@@ -1,44 +1,46 @@
 ## Repo snapshot
 
-- Main entry: `main.py` — a small CLI that scans a directory of `*.sql` files, auto-detects dialects (trino, duckdb, ansi), extracts input/output tables using `sqlglot`, and writes two Mermaid diagrams plus a dialect summary.
-- Dependency: `sqlglot>=27.29.0` (declared in `pyproject.toml`). Python requires >= 3.9.
+- **Main entry**: `main.py` — CLI that scans `*.sql` files, auto-detects dialects (trino, duckdb, ansi), extracts table dependencies via `sqlglot`, and outputs Mermaid diagrams + dialect summary.
+- **Dependency**: `sqlglot>=27.29.0` (in `pyproject.toml`). Python >= 3.9.
+- **No tests yet**: create `tests/` folder targeting `extract_dependencies` when adding test coverage.
 
-## What a coding agent should know (concise)
+## Key functions & architecture
 
-- Purpose: infer table-level and script-level dependencies across a collection of SQL scripts and emit Mermaid-compatible `.mmd` files plus a `*_dialects.txt` summary.
-- Key file: `main.py`. Important functions to read first: `auto_detect_parse`, `extract_dependencies`, `build_dependency_graph`, `build_script_dependencies`, and `generate_mermaid`.
-- Dialect detection: `auto_detect_parse(sql_text)` tries `trino`, then `duckdb`, then `ansi`. If none parse, the SQL is considered unparsed and the code returns an empty parse with a printed warning.
-- Table extraction: code looks for `sqlglot.expressions.Table` nodes (via `stmt.find_all(exp.Table)`) for inputs and `Create` / `Insert` expressions for outputs. Output table names are emitted using `stmt.this.sql(dialect="ansi")`.
+- **`auto_detect_parse(sql_text)`**: tries dialects in order (trino → duckdb → ansi). Returns `(parsed_statements, dialect)` or `([], None)` if unparseable.
+- **`fully_qualified_table_name(table_expr)`**: extracts catalog.schema.table (or schema.table or table) from sqlglot `Table` node. Preserves all available name parts.
+- **`extract_dependencies(sql_text)`**: finds input tables via `stmt.find_all(exp.Table)` and output tables from `Create`/`Insert` targets. Returns `(input_set, output_set, dialect)`.
+- **`build_dependency_graph(sql_dir)`**: scans `*.sql` files recursively, builds `{output_table: [input_tables]}` and file metadata.
+- **`build_script_dependencies(file_metadata)`**: creates script-level graph where `{script_B: [script_A]}` means A outputs what B reads.
+- **`generate_mermaid(graph)`**: converts dependency dict to Mermaid `graph TD` format.
 
-## Quick examples (from repo)
+## Usage & outputs
 
-- Run the CLI against a folder of SQL: `python main.py --sql-dir ./sql_scripts`
-- Default outputs (when `--out-prefix dependencies`):
-  - `dependencies_tables.mmd` — table-level graph
-  - `dependencies_scripts.mmd` — script-level (execution order) graph
-  - `dependencies_dialects.txt` — per-file detected dialects
+```bash
+python main.py --sql-dir ./sql_scripts [--out-prefix dependencies]
+```
 
-## Conventions & patterns to follow
+**Default outputs**:
 
-- SQL discovery: the code uses `Path.rglob("*.sql")` to find files; keep SQL files under a discoverable folder when adding tests or fixtures.
-- Table identity: identifiers are normalized by calling `table.sql(dialect="ansi")` and stripping quotes. Be careful when adding schema-aware logic — current code preserves whatever `sqlglot` produces for the `ansi` dialect.
-- Dialect list: if you add support for another dialect (e.g., `postgres`), update `auto_detect_parse` and keep the detection order intentional (more-specific dialects first).
-- Graph shapes: `table_graph` keys are output tables and values are lists of input tables. `script_graph` maps a script to upstream scripts (A → B if A outputs something B reads).
+- `dependencies_tables.mmd` — table-level dependency graph
+- `dependencies_scripts.mmd` — script-level execution order graph
+- `dependencies_dialects.txt` — per-file detected dialect summary
 
-## Error modes & expectations
+## Conventions & patterns
 
-- Unparseable SQL: `extract_dependencies` prints a warning and returns empty input/output sets; the file's dialect will be `unknown` in the dialect summary.
-- Ambiguous outputs: the code treats `CREATE` and `INSERT` targets as outputs. If a script mutates tables via DDL not represented as `Create`/`Insert`, it may be missed.
+- **SQL discovery**: uses `Path.rglob("*.sql")` to find files recursively.
+- **Table naming**: `fully_qualified_table_name` preserves catalog.schema.table structure from sqlglot AST. No quote stripping or normalization beyond what sqlglot provides.
+- **Dialect detection order**: more-specific dialects first (trino, duckdb, ansi). Add new dialects to `auto_detect_parse` list in priority order.
+- **Graph structure**:
+  - `table_graph` = `{output_table: [input_tables]}`
+  - `script_graph` = `{downstream_script: [upstream_scripts]}`
 
-## Helpful hints for contributors/agents
+## Error modes
 
-- When editing parsing logic, add small unit tests (create a `tests/` folder) with minimal SQL examples that exercise `Create`, `Insert`, `JOIN`, and subqueries. Tests are not present in the repo—create lightweight ones targeting `extract_dependencies`.
-- If you change output filenames or graph directions, update both places in `main.py` (generation and printing) so the CLI messages remain accurate.
-- For performance with many SQL files, prefer streaming reads and incremental graph updates; the current code reads whole files into memory via `Path.read_text()` which is fine for small-to-medium repos.
+- **Unparseable SQL**: `extract_dependencies` warns and returns empty sets; dialect = `unknown`.
+- **Missed outputs**: only `CREATE` and `INSERT` targets are detected as outputs. Other DDL (e.g., `ALTER`, `MERGE`) may be missed.
 
-## Where to look next in the codebase
+## Dev hints
 
-- `main.py` — primary logic and CLI
-- `pyproject.toml` — runtime dependency (`sqlglot`) and Python version
-
-If you want the file adjusted (different tone, more/less detail, add examples or tests), tell me what to expand or remove and I will iterate.
+- **Testing**: create `tests/` with minimal SQL examples exercising `CREATE`, `INSERT`, `JOIN`, subqueries. Target `extract_dependencies` and `fully_qualified_table_name`.
+- **Performance**: current code reads full files via `Path.read_text()`. Fine for small-to-medium repos; consider streaming for large datasets.
+- **Output changes**: if modifying filenames or graph directions, update both generation and CLI print messages in `main()`.

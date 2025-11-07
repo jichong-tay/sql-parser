@@ -1,13 +1,14 @@
 """
 main.py
-Analyze SQL dependencies across multiple .sql scripts (mixed dialects)
-and output:
+Analyze SQL dependencies across multiple .sql scripts (mixed dialects).
+
+Outputs:
   1. dependencies_tables.mmd  - table-level dependencies
   2. dependencies_scripts.mmd - script-level (execution order) dependencies
-  3. dialect_summary.txt      - which SQL file was parsed as which dialect
+  3. dependencies_dialects.txt - which SQL file was parsed as which dialect
 
 Usage:
-    python main.py --sql-dir ./sql_scripts
+    python main.py --sql-dir ./sql_scripts [--out-prefix dependencies]
 """
 
 import argparse
@@ -16,9 +17,11 @@ import sqlglot
 from sqlglot import expressions as exp
 
 
-# ---------------------------
-# Helper: auto-detect dialect
-# ---------------------------
+# -------------------------
+# Helper Functions
+# -------------------------
+
+
 def auto_detect_parse(sql_text: str):
     """
     Try parsing SQL in order: trino -> duckdb -> ansi
@@ -33,9 +36,29 @@ def auto_detect_parse(sql_text: str):
     return [], None
 
 
-# ---------------------------
-# Extract dependencies from SQL
-# ---------------------------
+def fully_qualified_table_name(table_expr):
+    """
+    Extract fully qualified table name from sqlglot Table expression.
+
+    Format: catalog.schema.table or schema.table or table
+    Preserves all available name parts (catalog, db/schema, table).
+    """
+    catalog = getattr(table_expr, "catalog", None)
+    db = getattr(table_expr, "db", None)
+    table = getattr(table_expr, "this", None)
+    name_parts = []
+    if catalog:
+        name_parts.append(str(catalog))
+    if db:
+        name_parts.append(str(db))
+    if table:
+        if hasattr(table, "name"):
+            name_parts.append(str(table.name))
+        else:
+            name_parts.append(str(table))
+    return ".".join(name_parts)
+
+
 def extract_dependencies(sql_text: str):
     input_tables = set()
     output_tables = set()
@@ -47,23 +70,25 @@ def extract_dependencies(sql_text: str):
         return input_tables, output_tables, None
 
     for stmt in parsed_statements:
-        # Extract all tables used in FROM, JOIN, etc.
         for table in stmt.find_all(exp.Table):
-            table_name = table.sql(dialect="ansi").strip('"')
+            table_name = fully_qualified_table_name(table)
             input_tables.add(table_name)
 
-        # Detect CREATE TABLE / INSERT INTO targets
         if isinstance(stmt, exp.Create):
-            output_tables.add(stmt.this.sql(dialect="ansi"))
+            output_table_name = fully_qualified_table_name(stmt.this)
+            output_tables.add(output_table_name)
         elif isinstance(stmt, exp.Insert):
-            output_tables.add(stmt.this.sql(dialect="ansi"))
+            output_table_name = fully_qualified_table_name(stmt.this)
+            output_tables.add(output_table_name)
 
     return input_tables, output_tables, dialect
 
 
-# ---------------------------
-# Build dependency graphs
-# ---------------------------
+# -------------------------
+# Core Functions
+# -------------------------
+
+
 def build_dependency_graph(sql_dir: Path):
     """
     Builds:
@@ -89,14 +114,12 @@ def build_dependency_graph(sql_dir: Path):
     return table_graph, file_metadata
 
 
-# ---------------------------
-# Build script-level dependencies
-# ---------------------------
 def build_script_dependencies(file_metadata):
     """
-    Determine which scripts depend on others.
+    Build script-level dependency graph.
+
     Script A → Script B if A outputs a table that B reads.
-    Returns {script_B: [script_A]}
+    Returns: {script_B: [script_A, ...]}
     """
     table_to_script = {}
     for script, meta in file_metadata.items():
@@ -116,10 +139,8 @@ def build_script_dependencies(file_metadata):
     return script_graph
 
 
-# ---------------------------
-# Mermaid Diagram Generator
-# ---------------------------
 def generate_mermaid(graph: dict, label: str = "graph TD") -> str:
+    """Generate Mermaid diagram from dependency graph."""
     lines = [label]
     for target, sources in graph.items():
         for src in sources:
@@ -128,10 +149,8 @@ def generate_mermaid(graph: dict, label: str = "graph TD") -> str:
     return "\n".join(lines)
 
 
-# ---------------------------
-# Save dialect summary
-# ---------------------------
 def save_dialect_summary(file_metadata, out_path: Path):
+    """Write dialect detection summary to file."""
     lines = ["Detected SQL dialects per file:\n"]
     for file, meta in file_metadata.items():
         lines.append(f"{file:<40} : {meta['dialect']}")
@@ -139,9 +158,11 @@ def save_dialect_summary(file_metadata, out_path: Path):
     print(f"\n🧠 Dialect summary saved to: {out_path}")
 
 
-# ---------------------------
-# Main CLI Entry
-# ---------------------------
+# -------------------------
+# CLI Entry
+# -------------------------
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Analyze SQL dependencies and output Mermaid diagrams."
@@ -160,13 +181,10 @@ def main():
 
     print(f"\n📂 Scanning SQL folder: {sql_dir}")
 
-    # Step 1. Parse and detect dialects
     table_graph, file_metadata = build_dependency_graph(sql_dir)
 
-    # Step 2. Script-level dependencies
     script_graph = build_script_dependencies(file_metadata)
 
-    # Step 3. Print summary
     print("\n📊 Table-level dependencies:")
     for tgt, srcs in table_graph.items():
         print(f"  {tgt} <- {srcs}")
@@ -179,7 +197,6 @@ def main():
     for file, meta in file_metadata.items():
         print(f"  {file:<40} : {meta['dialect']}")
 
-    # Step 4. Output Mermaid + Dialect files
     out_table = Path(f"{args.out_prefix}_tables.mmd")
     out_script = Path(f"{args.out_prefix}_scripts.mmd")
     out_dialect = Path(f"{args.out_prefix}_dialects.txt")
